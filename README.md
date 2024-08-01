@@ -2,7 +2,7 @@
 
 ## Description
 
-**Auto Self-Tend** is a quality-of-life mod for RimWorld that automatically enables the self-tend feature for colonists based on their medical skill level.
+**Auto Self-Tend** is a quality-of-life mod that automatically enables the self-tend feature for colonists based on their medical skill level.
 
 ## Features
 
