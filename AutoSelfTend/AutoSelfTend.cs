@@ -1,98 +1,140 @@
-﻿using System.Reflection;
-using HarmonyLib;
-using RimWorld;
+﻿// AutoSelfTend.cs
+using System.Collections.Generic;
 using UnityEngine;
+using RimWorld;
 using Verse;
 
 namespace AutoSelfTend
 {
-    [StaticConstructorOnStartup]
-    public static class AutoSelfTend
-    {
-        static AutoSelfTend()
-        {
-            var harmony = new Harmony("com.funstab.autoselftend");
-            harmony.PatchAll(Assembly.GetExecutingAssembly());
-        }
-
-        public static void UpdateAllColonists()
-        {
-            foreach (Pawn pawn in PawnsFinder.AllMapsCaravansAndTravelingTransportPods_Alive_OfPlayerFaction)
-            {
-                if (pawn.IsColonist)
-                {
-                    if (pawn.skills.GetSkill(SkillDefOf.Medicine).Level >= Settings.MinimumSkillLevel)
-                    {
-                        pawn.playerSettings.selfTend = true;
-                    }
-                    else
-                    {
-                        pawn.playerSettings.selfTend = false;
-                    }
-                }
-            }
-        }
-    }
-
-    [HarmonyPatch(typeof(Pawn))]
-    [HarmonyPatch("SpawnSetup")]
-    public static class Pawn_SpawnSetup_Patch
-    {
-        [HarmonyPostfix]
-        public static void AutoEnableSelfTend(Pawn __instance, bool respawningAfterLoad)
-        {
-            if (__instance.IsColonist)
-            {
-                if (__instance.skills.GetSkill(SkillDefOf.Medicine).Level >= Settings.MinimumSkillLevel)
-                {
-                    __instance.playerSettings.selfTend = true;
-                }
-                else
-                {
-                    __instance.playerSettings.selfTend = false;
-                }
-            }
-        }
-    }
 
     public class Settings : ModSettings
     {
-        public static int MinimumSkillLevel = 0;
+        public static int MinimumSkillLevel = 6;
 
         public override void ExposeData()
         {
-            base.ExposeData();
-            Scribe_Values.Look(ref MinimumSkillLevel, "MinimumSkillLevel", 0);
+            Scribe_Values.Look(ref MinimumSkillLevel, "MinimumSkillLevel", 6);
         }
     }
 
+
     public class AutoSelfTendMod : Mod
     {
-        private Settings settings;
-
         public AutoSelfTendMod(ModContentPack content) : base(content)
         {
-            this.settings = GetSettings<Settings>();
+            GetSettings<Settings>();
         }
+
+        public override string SettingsCategory() => "Auto Self-Tend";
 
         public override void DoSettingsWindowContents(Rect inRect)
         {
-            Listing_Standard listingStandard = new Listing_Standard();
-            listingStandard.Begin(inRect);
-            listingStandard.Label($"Minimum skill level to enable self-tend: {Settings.MinimumSkillLevel}");
-            int newSkillLevel = (int)listingStandard.Slider(Settings.MinimumSkillLevel, 0, 20);
-            if (newSkillLevel != Settings.MinimumSkillLevel)
-            {
-                Settings.MinimumSkillLevel = newSkillLevel;
-                AutoSelfTend.UpdateAllColonists();
-            }
-            listingStandard.End();
-            base.DoSettingsWindowContents(inRect);
+            var listing = new Listing_Standard();
+            listing.Begin(inRect);
+
+            listing.Label($"Minimum Medical skill for self-tend: {Settings.MinimumSkillLevel}");
+
+            // Slider (signature compatible with Verse)
+            var r = listing.GetRect(28f);
+            Settings.MinimumSkillLevel = Mathf.RoundToInt(
+                Widgets.HorizontalSlider(
+                    r,
+                    Settings.MinimumSkillLevel,
+                    0f, 20f,
+                    false,
+                    Settings.MinimumSkillLevel.ToString(),
+                    "0",
+                    "20",
+                    1f
+                )
+            );
+
+            listing.GapLine();
+            listing.Label("Colonists with Medical ≥ threshold will have Self-tend enabled; others disabled.");
+            listing.End();
         }
 
-        public override string SettingsCategory()
+        public override void WriteSettings()
         {
-            return "Auto Self-Tend";
+            base.WriteSettings();
+            AutoSelfTendGameComp.ApplyAllNow();
+        }
+    }
+
+ 
+    public class AutoSelfTendGameComp : GameComponent
+    {
+        private const int ApplyIntervalTicks = 1200;
+        private static readonly List<Pawn> _buffer = new List<Pawn>(64);
+
+        public AutoSelfTendGameComp() { }
+        public AutoSelfTendGameComp(Game _) { }
+
+        public override void FinalizeInit()
+        {
+            ApplyAllNow();
+        }
+
+        public override void GameComponentTick()
+        {
+            if (Find.TickManager.TicksGame % ApplyIntervalTicks == 0)
+                ApplyAllNow();
+        }
+
+        public static void ApplyAllNow()
+        {
+            if (Current.Game == null) return;
+
+            _buffer.Clear();
+            CollectPlayerColonists(_buffer);
+
+            for (int i = 0; i < _buffer.Count; i++)
+                ApplyToPawn(_buffer[i]);
+        }
+
+        private static void CollectPlayerColonists(List<Pawn> outPawns)
+        {
+
+            var maps = Find.Maps;
+            for (int i = 0; i < maps.Count; i++)
+            {
+                var map = maps[i];
+                var col = map?.mapPawns?.FreeColonists;
+                if (col == null) continue;
+                for (int j = 0; j < col.Count; j++)
+                    if (col[j] != null) outPawns.Add(col[j]);
+            }
+
+            var caravans = Find.WorldObjects?.Caravans;
+            if (caravans != null)
+            {
+                for (int i = 0; i < caravans.Count; i++)
+                {
+                    var caravan = caravans[i];
+                    if (caravan?.Faction != Faction.OfPlayer) continue;
+
+                    var pawns = caravan.PawnsListForReading;
+                    for (int j = 0; j < pawns.Count; j++)
+                    {
+                        var p = pawns[j];
+                        if (p != null && p.IsColonist) outPawns.Add(p);
+                    }
+                }
+            }
+        }
+
+        private static void ApplyToPawn(Pawn p)
+        {
+            if (p == null) return;
+            if (p.playerSettings == null) return;
+            if (p.skills == null) return;
+
+            var med = p.skills.GetSkill(SkillDefOf.Medicine);
+            int level = med?.Level ?? 0;
+
+            bool shouldEnable = level >= Settings.MinimumSkillLevel;
+            if (p.playerSettings.selfTend != shouldEnable)
+                p.playerSettings.selfTend = shouldEnable;
         }
     }
 }
